@@ -1,0 +1,45 @@
+services:
+  model:
+    build:
+      context: ./model
+    image: ai-job-fraud-model:latest
+    env_file:
+      - ./model/.env
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  backend:
+    build:
+      context: ./backend
+    image: ai-job-fraud-backend:latest
+    env_file:
+      - ./backend/.env
+    environment:
+      MODEL_SERVICE_URL: http://model:8001
+    ports:
+      - "8000:8000"
+    depends_on:
+      model:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+    image: ai-job-fraud-frontend:latest
+    env_file:
+      - ./frontend/.env
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+

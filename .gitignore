@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+node_modules/
+dist/
+build/
+.env.local
+*.log
+logs/
+backend/app/data/*.json
+!backend/app/data/.gitkeep
+model/models/*.pt
+!model/models/.gitkeep
