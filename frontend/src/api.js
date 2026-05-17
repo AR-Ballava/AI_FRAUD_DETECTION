@@ -1,4 +1,4 @@
-const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000').replace(/\/$/, '');
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL).replace(/\/$/, '');
 
 async function parseResponse(response) {
   const data = await response.json().catch(() => ({}));
