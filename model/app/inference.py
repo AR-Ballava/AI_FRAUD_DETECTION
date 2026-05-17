@@ -13,7 +13,7 @@ from app.rules import score_with_rules
 
 
 class FraudLinearModel(torch.nn.Module):
-    def __init__(self, input_size: int = 16, output_size: int = 5):
+    def __init__(self, input_size: int = 16, output_size: int = 2):
         super().__init__()
         self.classifier = torch.nn.Sequential(
             torch.nn.Linear(input_size, 32),
@@ -34,11 +34,8 @@ class LoadedModel:
 
 
 LABELS = [
-    "fake_job_posting",
-    "fraudulent_offer_letter",
-    "scam_recruitment_email",
-    "suspicious_terms_conditions",
-    "company_fraud_signals",
+    "legitimate",
+    "fraud",
 ]
 
 

@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+"""
+osint.py — Advanced OSINT-based Suspicious Entity Detection Engine
+==================================================================
+This module powers the fraud investigation pipeline.  It does two things:
+
+1. **Suspicious-entity detection** (local, instant):
+   ``score_suspicious_entities()`` accepts raw text or a pre-built entity list,
+   applies contextual fraud-keyword matching within a ±2-sentence window, scores
+   every candidate on a weighted rubric, filters out clean entities, and returns
+   only those with at least one fraud signal — ranked highest-risk first.
+
+2. **Public-intelligence gathering** (async, network):
+   ``run_osint()`` fans out across DuckDuckGo, Reddit, HackerNews, GDELT, RDAP
+   etc. to collect external evidence, then folds that evidence back into the
+   suspicious-entity scores for a final, enriched result.
+"""
+
 import asyncio
 import html
 import json
@@ -9,15 +26,51 @@ from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 import httpx
 
-from app.utils.entities import FREE_EMAIL_DOMAINS, has_free_email
+from app.utils.entities import (
+    FREE_EMAIL_DOMAINS,
+    FRAUD_KEYWORDS_PRIMARY,
+    FRAUD_KEYWORDS_SECONDARY,
+    SUSPICIOUS_TLDS,
+    extract_suspicious_entities,
+    find_fraud_keywords_in_context,
+    get_sentence_window,
+    has_free_email,
+)
 
 
-SCAM_WORDS = re.compile(r"\b(scam|fraud|fake|complaint|warning|phishing|blacklist|cheat|cheated|spam)\b", re.IGNORECASE)
-SUSPICIOUS_TLDS = {"xyz", "top", "site", "online", "work", "shop"}
+# ---------------------------------------------------------------------------
+# Shared constants
+# ---------------------------------------------------------------------------
+
+SCAM_WORDS = re.compile(
+    r"\b(scam|fraud|fraudulent|fake|complaint|warning|phishing|blacklist|"
+    r"blacklisted|cheat|cheated|spam|reported|suspicious|illegitimate|impersonat)\b",
+    re.IGNORECASE,
+)
+
+RELEVANCE_PATTERN = re.compile(
+    r"\b("
+    r"job|jobs|hiring|hire|recruit|recruitment|recruiter|career|careers|"
+    r"employ|employee|employer|employment|vacancy|vacancies|position|opening|"
+    r"salary|hr|human.?resource|interview|internship|fresher|placement|"
+    r"staffing|headhunt|onboarding|resume|cv|work.?from.?home|wfh|"
+    r"offer.?letter|joining|designation|"
+    r"company|companies|firm|startup|business|organisation|organization|"
+    r"corporation|enterprise|brand|"
+    r"fraud|scam|fake|phishing|cheat|complaint|warning|blacklist|spam|"
+    r"ponzi|pyramid|scheme|mislead|impersonat|fake.?offer|advance.?fee|"
+    r"job.?scam|recruitment.?scam|"
+    r"linkedin|glassdoor|indeed|naukri|monster|shine|apna|internshala|"
+    r"review|rating|feedback|testimonial|employer.?review|work.?culture"
+    r")\b",
+    re.IGNORECASE,
+)
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; FraudLensAI/1.0; +https://example.local/osint)",
     "Accept-Language": "en-US,en;q=0.9",
 }
+
 DDG_RESULT_RE = re.compile(
     r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
     re.IGNORECASE | re.DOTALL,
@@ -28,14 +81,199 @@ DDG_GENERIC_LINK_RE = re.compile(
 )
 JINA_DDG_RESULT_RE = re.compile(r"^## \[(.*?)\]\((https?://[^\)]+)\)", re.MULTILINE)
 DDG_SNIPPET_RE = re.compile(
-    r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</div>',
+    r'<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>'
+    r'|<div[^>]+class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</div>',
     re.IGNORECASE | re.DOTALL,
 )
 TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 
 
+# ---------------------------------------------------------------------------
+# Score weights — centralised so they are easy to tune
+# ---------------------------------------------------------------------------
+
+WEIGHTS: dict[str, int] = {
+    # Keyword category weights
+    "primary_keyword": 18,       # "recruitment scam", "phishing", "blacklist" …
+    "secondary_keyword": 8,      # "scam", "fraud", "fake", "spam" …
+    "keyword_repeat_bonus": 4,   # each extra occurrence of any fraud keyword
+    # Entity-type structural risks
+    "free_email": 15,            # gmail/yahoo for a "corporate" contact
+    "suspicious_tld": 14,        # .xyz .top .site .work etc.
+    "multiple_keywords": 10,     # 3+ distinct fraud keywords in window
+    # External evidence bonuses (applied after OSINT fetch)
+    "external_scam_report": 12,  # scam-report site mentions this entity
+    "external_complaint": 8,     # complaint / warning mention in public data
+    "domain_young_180d": 20,     # domain < 180 days old
+    "domain_young_365d": 10,     # domain < 1 year old
+}
+
+# Minimum score for an entity to appear in results
+MIN_SCORE_THRESHOLD = 10
+
+
+# ---------------------------------------------------------------------------
+# Local suspicious-entity scoring
+# ---------------------------------------------------------------------------
+
+def _score_entity(candidate: dict) -> int:
+    """
+    Compute a 0-100 risk score for a single suspicious-entity candidate.
+
+    ``candidate`` is produced by ``extract_suspicious_entities()`` and already
+    has ``matched_keywords``, ``type``, ``entity``, and ``context``.
+    """
+    score = 0
+    entity_val: str = candidate.get("entity", "")
+    entity_type: str = candidate.get("type", "")
+    matched: list[str] = candidate.get("matched_keywords", [])
+    context: str = candidate.get("context", "")
+
+    # --- Keyword scoring ---
+    primary_matches = [kw for kw in matched if kw.lower() in [p.lower() for p in FRAUD_KEYWORDS_PRIMARY]]
+    secondary_matches = [kw for kw in matched if kw.lower() in [s.lower() for s in FRAUD_KEYWORDS_SECONDARY]
+                         and kw.lower() not in [p.lower() for p in FRAUD_KEYWORDS_PRIMARY]]
+
+    score += len(primary_matches) * WEIGHTS["primary_keyword"]
+    score += len(secondary_matches) * WEIGHTS["secondary_keyword"]
+
+    # Bonus for keyword density (3+ unique fraud signals)
+    if len(set(kw.lower() for kw in matched)) >= 3:
+        score += WEIGHTS["multiple_keywords"]
+
+    # Bonus for repeated mentions in the context window
+    all_occurrences = SCAM_WORDS.findall(context)
+    repeat_bonus = max(0, len(all_occurrences) - len(matched)) * WEIGHTS["keyword_repeat_bonus"]
+    score += repeat_bonus
+
+    # --- Structural entity risks ---
+    if entity_type == "email":
+        domain = entity_val.split("@", 1)[-1].lower() if "@" in entity_val else ""
+        if domain in FREE_EMAIL_DOMAINS:
+            score += WEIGHTS["free_email"]
+        tld = domain.rsplit(".", 1)[-1] if "." in domain else ""
+        if tld in SUSPICIOUS_TLDS:
+            score += WEIGHTS["suspicious_tld"]
+
+    if entity_type in ("url", "domain"):
+        raw = entity_val.replace("https://", "").replace("http://", "").split("/")[0]
+        tld = raw.rsplit(".", 1)[-1].lower() if "." in raw else ""
+        if tld in SUSPICIOUS_TLDS:
+            score += WEIGHTS["suspicious_tld"]
+
+    return min(100, score)
+
+
+def score_suspicious_entities(
+    text: str,
+    min_score: int = MIN_SCORE_THRESHOLD,
+) -> list[dict]:
+    """
+    Full local pipeline:
+      1. Extract entities from ``text``.
+      2. Apply ±2-sentence contextual fraud-keyword matching.
+      3. Drop entities with zero fraud signals.
+      4. Score each surviving entity.
+      5. Return sorted list (highest score first), each entry containing:
+           entity, type, score, matched_keywords, context, evidence_summary.
+
+    If no entity has even one fraud signal the function returns an empty list —
+    the caller should treat that as "no suspicious entities detected".
+    """
+    candidates = extract_suspicious_entities(text)
+    if not candidates:
+        return []
+
+    scored: list[dict] = []
+    for candidate in candidates:
+        raw_score = _score_entity(candidate)
+        if raw_score < min_score:
+            continue
+        scored.append(
+            {
+                "entity": candidate["entity"],
+                "type": candidate["type"],
+                "score": raw_score,
+                "matched_keywords": candidate["matched_keywords"],
+                "context": candidate["context"][:400],
+                "evidence_summary": _build_evidence_summary(candidate),
+            }
+        )
+
+    # Sort: highest risk first; secondary sort by entity type priority
+    TYPE_PRIORITY = {"email": 0, "phone": 1, "url": 2, "domain": 3, "company": 4, "recruiter": 5}
+    scored.sort(key=lambda x: (-x["score"], TYPE_PRIORITY.get(x["type"], 99)))
+    return scored
+
+
+def _build_evidence_summary(candidate: dict) -> str:
+    """Human-readable one-liner explaining why an entity is flagged."""
+    kws = ", ".join(candidate.get("matched_keywords", [])[:4])
+    entity_type = candidate.get("type", "entity")
+    entity_val = candidate.get("entity", "")
+    return (
+        f'The {entity_type} "{entity_val}" appears in context containing '
+        f"fraud-related terms: {kws}."
+    )
+
+
+def _enrich_with_external_evidence(
+    scored: list[dict],
+    external_evidence: list[dict],
+) -> list[dict]:
+    """
+    Boost scores of already-suspicious entities when external OSINT evidence
+    mentions the same entity value.  Re-sorts the list after boosting.
+    """
+    if not external_evidence or not scored:
+        return scored
+
+    # Build a lookup: entity_value_lower → list[evidence_item]
+    evidence_by_entity: dict[str, list[dict]] = {}
+    for item in external_evidence:
+        text = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
+        for entry in scored:
+            ev = entry["entity"].lower()
+            if ev and ev in text:
+                evidence_by_entity.setdefault(ev, []).append(item)
+
+    for entry in scored:
+        ev = entry["entity"].lower()
+        ext_items = evidence_by_entity.get(ev, [])
+        if not ext_items:
+            continue
+        boost = 0
+        extra_keywords: list[str] = []
+        for item in ext_items[:5]:
+            item_text = f"{item.get('title', '')} {item.get('snippet', '')}".lower()
+            if SCAM_WORDS.search(item_text):
+                boost += WEIGHTS["external_scam_report"]
+                extra_keywords.append("scam report (external)")
+            else:
+                boost += WEIGHTS["external_complaint"]
+                extra_keywords.append("public mention (external)")
+        entry["score"] = min(100, entry["score"] + boost)
+        entry["matched_keywords"] = list(
+            dict.fromkeys(entry["matched_keywords"] + extra_keywords)
+        )
+        entry["external_evidence_count"] = len(ext_items)
+
+    TYPE_PRIORITY = {"email": 0, "phone": 1, "url": 2, "domain": 3, "company": 4, "recruiter": 5}
+    scored.sort(key=lambda x: (-x["score"], TYPE_PRIORITY.get(x["type"], 99)))
+    return scored
+
+
+# ---------------------------------------------------------------------------
+# Network helpers (unchanged logic, cleaned up)
+# ---------------------------------------------------------------------------
+
+def _is_relevant(item: dict) -> bool:
+    text = f"{item.get('title', '')} {item.get('snippet', '')} {item.get('url', '')}"
+    return bool(RELEVANCE_PATTERN.search(text))
+
+
 def _query_from_entities(entities: dict) -> str:
-    pieces = []
+    pieces: list[str] = []
     for key in ("companies", "domains", "emails", "recruiters", "positions", "phones"):
         pieces.extend(entities.get(key, [])[:2])
     if not pieces:
@@ -71,7 +309,6 @@ def _ddg_url(href: str) -> str:
         decoded = "https:" + decoded
     elif decoded.startswith("/"):
         decoded = "https://duckduckgo.com" + decoded
-
     parsed = urlparse(decoded)
     uddg = parse_qs(parsed.query).get("uddg")
     if uddg:
@@ -82,7 +319,7 @@ def _ddg_url(href: str) -> str:
 def _dedupe_results(results: list[dict], limit: int = 60) -> list[dict]:
     seen_urls: set[str] = set()
     seen_titles: set[str] = set()
-    deduped = []
+    deduped: list[dict] = []
     for item in results:
         url = (item.get("url") or "").strip()
         title = re.sub(r"\s+", " ", (item.get("title") or "")).strip()
@@ -103,27 +340,6 @@ def _dedupe_results(results: list[dict], limit: int = 60) -> list[dict]:
     return deduped
 
 
-def _parse_duckduckgo_html(markup: str, source_label: str) -> list[dict]:
-    anchors = DDG_RESULT_RE.findall(markup)
-    if not anchors:
-        anchors = DDG_GENERIC_LINK_RE.findall(markup)
-    snippets = [snippet_a or snippet_div for snippet_a, snippet_div in DDG_SNIPPET_RE.findall(markup)]
-    results = []
-    for index, (href, title_html) in enumerate(anchors):
-        url = _ddg_url(href)
-        if "duckduckgo.com" in urlparse(url).netloc:
-            continue
-        results.append(
-            {
-                "source": source_label,
-                "title": _clean_html(title_html),
-                "url": url,
-                "snippet": _clean_html(snippets[index] if index < len(snippets) else ""),
-            }
-        )
-    return _dedupe_results(results, limit=20)
-
-
 def _clean_markdown(value: str) -> str:
     value = re.sub(r"!\[[^\]]*\]\([^\)]*\)", " ", value)
     value = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", value)
@@ -131,34 +347,58 @@ def _clean_markdown(value: str) -> str:
     return re.sub(r"\s+", " ", html.unescape(value)).strip()
 
 
+def _parse_duckduckgo_html(markup: str, source_label: str) -> list[dict]:
+    anchors = DDG_RESULT_RE.findall(markup)
+    if not anchors:
+        anchors = DDG_GENERIC_LINK_RE.findall(markup)
+    snippets = [a or b for a, b in DDG_SNIPPET_RE.findall(markup)]
+    results: list[dict] = []
+    for index, (href, title_html) in enumerate(anchors):
+        url = _ddg_url(href)
+        if "duckduckgo.com" in urlparse(url).netloc:
+            continue
+        item = {
+            "source": source_label,
+            "title": _clean_html(title_html),
+            "url": url,
+            "snippet": _clean_html(snippets[index] if index < len(snippets) else ""),
+        }
+        if _is_relevant(item):
+            results.append(item)
+    return _dedupe_results(results, limit=20)
+
+
 def _parse_jina_duckduckgo(markdown: str, source_label: str) -> list[dict]:
     matches = list(JINA_DDG_RESULT_RE.finditer(markdown))
-    results = []
+    results: list[dict] = []
     for index, match in enumerate(matches):
         title = _clean_markdown(match.group(1))
         url = _ddg_url(match.group(2))
         if not title or "duckduckgo.com" in urlparse(url).netloc:
             continue
         next_start = matches[index + 1].start() if index + 1 < len(matches) else len(markdown)
-        body = markdown[match.end() : next_start]
+        body = markdown[match.end(): next_start]
         snippet_lines = [
-            line
-            for line in body.splitlines()
+            line for line in body.splitlines()
             if line.strip()
             and not line.strip().startswith("[![")
             and "duckduckgo.com/l/?" not in line
             and "URL Source:" not in line
         ]
-        results.append(
-            {
-                "source": source_label,
-                "title": title,
-                "url": url,
-                "snippet": _clean_markdown(" ".join(snippet_lines))[:700],
-            }
-        )
+        item = {
+            "source": source_label,
+            "title": title,
+            "url": url,
+            "snippet": _clean_markdown(" ".join(snippet_lines))[:700],
+        }
+        if _is_relevant(item):
+            results.append(item)
     return _dedupe_results(results, limit=20)
 
+
+# ---------------------------------------------------------------------------
+# Async data-source fetchers
+# ---------------------------------------------------------------------------
 
 async def _duckduckgo_instant(client: httpx.AsyncClient, query: str) -> dict:
     try:
@@ -169,52 +409,49 @@ async def _duckduckgo_instant(client: httpx.AsyncClient, query: str) -> dict:
         )
         response.raise_for_status()
         data = response.json()
-        results = []
+        results: list[dict] = []
         if data.get("AbstractURL"):
-            results.append(
-                {
-                    "source": "DuckDuckGo",
-                    "title": data.get("Heading") or "DuckDuckGo abstract",
-                    "url": data.get("AbstractURL"),
-                    "snippet": data.get("AbstractText") or "",
-                }
-            )
+            item = {
+                "source": "DuckDuckGo",
+                "title": data.get("Heading") or "DuckDuckGo abstract",
+                "url": data.get("AbstractURL"),
+                "snippet": data.get("AbstractText") or "",
+            }
+            if _is_relevant(item):
+                results.append(item)
         for topic in data.get("RelatedTopics", [])[:12]:
-            if "Topics" in topic:
-                nested = topic.get("Topics", [])
-            else:
-                nested = [topic]
-            for item in nested[:3]:
-                if item.get("FirstURL"):
-                    results.append(
-                        {
-                            "source": "DuckDuckGo",
-                            "title": item.get("Text", "")[:120] or "Related result",
-                            "url": item.get("FirstURL"),
-                            "snippet": item.get("Text", ""),
-                        }
-                    )
+            nested = topic.get("Topics", [topic]) if "Topics" in topic else [topic]
+            for t in nested[:3]:
+                if t.get("FirstURL"):
+                    entry = {
+                        "source": "DuckDuckGo",
+                        "title": t.get("Text", "")[:120] or "Related result",
+                        "url": t["FirstURL"],
+                        "snippet": t.get("Text", ""),
+                    }
+                    if _is_relevant(entry):
+                        results.append(entry)
         return {"source": "duckduckgo_instant", "ok": True, "results": results[:10]}
     except Exception as exc:
         return {"source": "duckduckgo_instant", "ok": False, "error": str(exc), "results": []}
 
 
-async def _duckduckgo_search(client: httpx.AsyncClient, query: str, source: str = "DuckDuckGo Web", limit: int = 12) -> dict:
+async def _duckduckgo_search(
+    client: httpx.AsyncClient,
+    query: str,
+    source: str = "DuckDuckGo Web",
+    limit: int = 12,
+) -> dict:
     endpoints = [
         "https://html.duckduckgo.com/html/",
         "https://lite.duckduckgo.com/lite/",
     ]
-    errors = []
+    errors: list[str] = []
     source_key = source.lower().replace(" ", "_")
     empty_response = None
     for endpoint in endpoints:
         try:
-            response = await client.get(
-                endpoint,
-                params={"q": query},
-                headers=DEFAULT_HEADERS,
-                timeout=4.0,
-            )
+            response = await client.get(endpoint, params={"q": query}, headers=DEFAULT_HEADERS, timeout=4.0)
             response.raise_for_status()
             results = _parse_duckduckgo_html(response.text, source)[:limit]
             if results:
@@ -238,11 +475,18 @@ async def _duckduckgo_search(client: httpx.AsyncClient, query: str, source: str 
         return empty_response
     return {"source": source_key, "ok": False, "error": "; ".join(errors[:2]), "results": [], "query": query}
 
-async def _duckduckgo_site_bundle(client: httpx.AsyncClient, query: str, source: str, sites: list[str], limit: int = 16) -> dict:
+
+async def _duckduckgo_site_bundle(
+    client: httpx.AsyncClient,
+    query: str,
+    source: str,
+    sites: list[str],
+    limit: int = 16,
+) -> dict:
     site_query = f"{query} " + " OR ".join(f"site:{site}" for site in sites)
     results = [await _duckduckgo_search(client, site_query, source, limit=limit)]
-    evidence = []
-    errors = []
+    evidence: list[dict] = []
+    errors: list[str] = []
     for result in results:
         if isinstance(result, Exception):
             errors.append(str(result))
@@ -267,23 +511,23 @@ async def _reddit(client: httpx.AsyncClient, query: str) -> dict:
         )
         response.raise_for_status()
         data = response.json()
-        posts = []
+        posts: list[dict] = []
         for child in data.get("data", {}).get("children", []):
             post = child.get("data", {})
             title = post.get("title") or "Reddit discussion"
             permalink = post.get("permalink") or ""
-            posts.append(
-                {
-                    "source": "Reddit",
-                    "title": title,
-                    "url": f"https://www.reddit.com{permalink}" if permalink.startswith("/") else permalink,
-                    "snippet": (post.get("selftext") or title)[:500],
-                    "score": post.get("score", 0),
-                    "comments": post.get("num_comments", 0),
-                    "subreddit": post.get("subreddit"),
-                    "classified_as_scam_report": bool(SCAM_WORDS.search(title + " " + (post.get("selftext") or ""))),
-                }
-            )
+            item = {
+                "source": "Reddit",
+                "title": title,
+                "url": f"https://www.reddit.com{permalink}" if permalink.startswith("/") else permalink,
+                "snippet": (post.get("selftext") or title)[:500],
+                "score": post.get("score", 0),
+                "comments": post.get("num_comments", 0),
+                "subreddit": post.get("subreddit"),
+                "classified_as_scam_report": bool(SCAM_WORDS.search(title + " " + (post.get("selftext") or ""))),
+            }
+            if _is_relevant(item):
+                posts.append(item)
         return {"source": "reddit", "ok": True, "results": posts}
     except Exception as exc:
         return {"source": "reddit", "ok": False, "error": str(exc), "results": []}
@@ -300,20 +544,17 @@ def _walk_json(value):
 
 
 def _youtube_initial_data(markup: str) -> dict | None:
-    marker = "var ytInitialData = "
-    start = markup.find(marker)
-    if start == -1:
-        marker = "ytInitialData = "
+    for marker in ("var ytInitialData = ", "ytInitialData = "):
         start = markup.find(marker)
-    if start == -1:
-        return None
-    start += len(marker)
-    decoder = json.JSONDecoder()
-    try:
-        data, _ = decoder.raw_decode(markup[start:])
-        return data
-    except json.JSONDecodeError:
-        return None
+        if start != -1:
+            start += len(marker)
+            decoder = json.JSONDecoder()
+            try:
+                data, _ = decoder.raw_decode(markup[start:])
+                return data
+            except json.JSONDecodeError:
+                pass
+    return None
 
 
 def _runs_text(value: dict) -> str:
@@ -333,7 +574,7 @@ async def _youtube_search(client: httpx.AsyncClient, query: str) -> dict:
         )
         response.raise_for_status()
         data = _youtube_initial_data(response.text)
-        results = []
+        results: list[dict] = []
         if data:
             for node in _walk_json(data):
                 renderer = node.get("videoRenderer") if isinstance(node, dict) else None
@@ -342,15 +583,15 @@ async def _youtube_search(client: httpx.AsyncClient, query: str) -> dict:
                 title = _runs_text(renderer.get("title", {}))
                 snippet = _runs_text(renderer.get("descriptionSnippet", {}))
                 channel = _runs_text(renderer.get("ownerText", {}))
-                results.append(
-                    {
-                        "source": "YouTube",
-                        "title": title or "YouTube video",
-                        "url": f"https://www.youtube.com/watch?v={renderer['videoId']}",
-                        "snippet": snippet,
-                        "channel": channel,
-                    }
-                )
+                item = {
+                    "source": "YouTube",
+                    "title": title or "YouTube video",
+                    "url": f"https://www.youtube.com/watch?v={renderer['videoId']}",
+                    "snippet": snippet,
+                    "channel": channel,
+                }
+                if _is_relevant(item):
+                    results.append(item)
         return {"source": "youtube", "ok": True, "results": _dedupe_results(results, limit=10)}
     except Exception as exc:
         return {"source": "youtube", "ok": False, "error": str(exc), "results": []}
@@ -365,19 +606,19 @@ async def _hackernews(client: httpx.AsyncClient, query: str) -> dict:
         )
         response.raise_for_status()
         data = response.json()
-        results = []
+        results: list[dict] = []
         for hit in data.get("hits", []):
             url = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
-            results.append(
-                {
-                    "source": "Hacker News",
-                    "title": hit.get("title") or hit.get("story_title") or "Hacker News discussion",
-                    "url": url,
-                    "snippet": hit.get("comment_text") or "",
-                    "points": hit.get("points"),
-                    "comments": hit.get("num_comments"),
-                }
-            )
+            item = {
+                "source": "Hacker News",
+                "title": hit.get("title") or hit.get("story_title") or "Hacker News discussion",
+                "url": url,
+                "snippet": hit.get("comment_text") or "",
+                "points": hit.get("points"),
+                "comments": hit.get("num_comments"),
+            }
+            if _is_relevant(item):
+                results.append(item)
         return {"source": "hacker_news", "ok": True, "results": results}
     except Exception as exc:
         return {"source": "hacker_news", "ok": False, "error": str(exc), "results": []}
@@ -392,8 +633,9 @@ async def _gdelt(client: httpx.AsyncClient, query: str) -> dict:
         )
         response.raise_for_status()
         data = response.json()
-        results = [
-            {
+        results: list[dict] = []
+        for article in data.get("articles", []):
+            item = {
                 "source": "GDELT News",
                 "title": article.get("title") or "Public news article",
                 "url": article.get("url"),
@@ -401,31 +643,11 @@ async def _gdelt(client: httpx.AsyncClient, query: str) -> dict:
                 "domain": article.get("domain"),
                 "language": article.get("language"),
             }
-            for article in data.get("articles", [])
-        ]
+            if _is_relevant(item):
+                results.append(item)
         return {"source": "gdelt_news", "ok": True, "results": _dedupe_results(results, limit=12)}
     except Exception as exc:
         return {"source": "gdelt_news", "ok": False, "error": str(exc), "results": []}
-
-
-async def _rdap_domain(client: httpx.AsyncClient, domain: str) -> dict:
-    try:
-        response = await client.get(f"https://rdap.org/domain/{domain}")
-        response.raise_for_status()
-        data = response.json()
-        age_days = _domain_age_days(data)
-        tld = domain.rsplit(".", 1)[-1].lower()
-        return {
-            "source": "rdap",
-            "ok": True,
-            "domain": domain,
-            "age_days": age_days,
-            "registrar": data.get("registrar", {}).get("name") if isinstance(data.get("registrar"), dict) else None,
-            "suspicious_tld": tld in SUSPICIOUS_TLDS,
-            "raw_status": data.get("status", []),
-        }
-    except Exception as exc:
-        return {"source": "rdap", "ok": False, "domain": domain, "error": str(exc)}
 
 
 async def _github(client: httpx.AsyncClient, query: str) -> dict:
@@ -446,6 +668,11 @@ async def _github(client: httpx.AsyncClient, query: str) -> dict:
                 "stars": item.get("stargazers_count", 0),
             }
             for item in data.get("items", [])
+            if _is_relevant({
+                "title": item.get("full_name", ""),
+                "snippet": item.get("description") or "",
+                "url": item.get("html_url", ""),
+            })
         ]
         return {"source": "github", "ok": True, "results": results}
     except Exception as exc:
@@ -453,7 +680,7 @@ async def _github(client: httpx.AsyncClient, query: str) -> dict:
 
 
 async def _company_homepages(client: httpx.AsyncClient, domains: list[str]) -> dict:
-    results = []
+    results: list[dict] = []
     for domain in domains[:3]:
         for scheme in ("https", "http"):
             try:
@@ -475,9 +702,37 @@ async def _company_homepages(client: httpx.AsyncClient, domains: list[str]) -> d
     return {"source": "company_websites", "ok": True, "results": results}
 
 
+async def _rdap_domain(client: httpx.AsyncClient, domain: str) -> dict:
+    try:
+        response = await client.get(f"https://rdap.org/domain/{domain}")
+        response.raise_for_status()
+        data = response.json()
+        age_days = _domain_age_days(data)
+        tld = domain.rsplit(".", 1)[-1].lower()
+        return {
+            "source": "rdap",
+            "ok": True,
+            "domain": domain,
+            "age_days": age_days,
+            "registrar": (
+                data.get("registrar", {}).get("name")
+                if isinstance(data.get("registrar"), dict)
+                else None
+            ),
+            "suspicious_tld": tld in SUSPICIOUS_TLDS,
+            "raw_status": data.get("status", []),
+        }
+    except Exception as exc:
+        return {"source": "rdap", "ok": False, "domain": domain, "error": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Risk score (OSINT-level, entity-aggregate)
+# ---------------------------------------------------------------------------
+
 def _classify_reports(evidence: list[dict]) -> dict:
-    scam_reports = []
-    neutral_mentions = []
+    scam_reports: list[dict] = []
+    neutral_mentions: list[dict] = []
     for item in evidence:
         text = f"{item.get('title', '')} {item.get('snippet', '')}"
         if SCAM_WORDS.search(text):
@@ -491,9 +746,14 @@ def _classify_reports(evidence: list[dict]) -> dict:
     }
 
 
-def _risk_score(entities: dict, domain_results: list[dict], scam_report_count: int, initial_fraud_score: float) -> dict:
+def _risk_score(
+    entities: dict,
+    domain_results: list[dict],
+    scam_report_count: int,
+    initial_fraud_score: float,
+) -> dict:
     score = min(35, initial_fraud_score * 0.35)
-    reasons = []
+    reasons: list[str] = []
 
     if has_free_email(entities):
         score += 15
@@ -504,13 +764,13 @@ def _risk_score(entities: dict, domain_results: list[dict], scam_report_count: i
             continue
         age = domain.get("age_days")
         if age is not None and age < 180:
-            score += 20
+            score += WEIGHTS["domain_young_180d"]
             reasons.append(f"{domain.get('domain')} is less than 180 days old")
         elif age is not None and age < 365:
-            score += 10
+            score += WEIGHTS["domain_young_365d"]
             reasons.append(f"{domain.get('domain')} is less than one year old")
         if domain.get("suspicious_tld"):
-            score += 10
+            score += WEIGHTS["suspicious_tld"]
             reasons.append(f"{domain.get('domain')} uses a higher-risk TLD")
 
     if scam_report_count:
@@ -542,40 +802,68 @@ def _search_urls(query: str) -> dict:
     }
 
 
-async def run_osint(entities: dict, initial_fraud_score: float, timeout: float) -> dict:
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+async def run_osint(
+    entities: dict,
+    initial_fraud_score: float,
+    timeout: float,
+    source_text: str = "",
+) -> dict:
+    """
+    Main OSINT pipeline.
+
+    Parameters
+    ----------
+    entities:            merged entity dict from the upload/analyse routes.
+    initial_fraud_score: ML fraud score (0-100) from the model service.
+    timeout:             per-request network timeout in seconds.
+    source_text:         original document text (used for local entity scoring).
+
+    Returns a dict containing:
+    - suspicious_entities  – ranked list from local + external scoring
+    - evidence             – deduplicated public-intelligence items
+    - domain_intelligence  – RDAP domain age/registrar data
+    - risk                 – aggregate OSINT risk score
+    - scam_reports         – evidence items that matched scam keywords
+    - source_status        – per-source ok/error status
+    - search_urls          – manual investigation links
+    """
     query = _query_from_entities(entities)
     domains = [d for d in entities.get("domains", []) if d.lower() not in FREE_EMAIL_DOMAINS]
-    domain_tasks = []
 
+    # ------------------------------------------------------------------
+    # Step 1 — local contextual entity scoring (instant, no network)
+    # ------------------------------------------------------------------
+    locally_scored: list[dict] = []
+    if source_text:
+        locally_scored = score_suspicious_entities(source_text)
+
+    # ------------------------------------------------------------------
+    # Step 2 — fan-out async OSINT network requests
+    # ------------------------------------------------------------------
     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout), follow_redirects=True) as client:
         task_specs = [
             _duckduckgo_instant(client, query),
             _duckduckgo_search(client, query, "DuckDuckGo Web", limit=14),
             _duckduckgo_site_bundle(
-                client,
-                query,
-                "LinkedIn public results",
-                ["linkedin.com/company", "linkedin.com/in", "linkedin.com/jobs"],
-                limit=12,
+                client, query, "LinkedIn public results",
+                ["linkedin.com/company", "linkedin.com/in", "linkedin.com/jobs"], limit=12,
             ),
             _duckduckgo_site_bundle(
-                client,
-                query,
-                "Reviews and job forums",
+                client, query, "Reviews and job forums",
                 ["glassdoor.com", "ambitionbox.com", "teamblind.com", "indeed.com/cmp", "fishbowlapp.com"],
                 limit=14,
             ),
             _duckduckgo_site_bundle(
-                client,
-                query,
-                "Scam report sites",
+                client, query, "Scam report sites",
                 ["scamadviser.com", "trustpilot.com", "complaintsboard.com", "consumercomplaints.in", "mouthshut.com"],
                 limit=14,
             ),
             _duckduckgo_site_bundle(
-                client,
-                query,
-                "Public posts and blogs",
+                client, query, "Public posts and blogs",
                 ["medium.com", "substack.com", "quora.com", "wordpress.com", "blogspot.com"],
                 limit=14,
             ),
@@ -588,23 +876,33 @@ async def run_osint(entities: dict, initial_fraud_score: float, timeout: float) 
             _company_homepages(client, domains),
         ]
         domain_tasks = [_rdap_domain(client, domain) for domain in domains[:5]]
-        scheduled = [asyncio.create_task(task) for task in [*task_specs, *domain_tasks]]
+        scheduled = [asyncio.create_task(t) for t in [*task_specs, *domain_tasks]]
         done, pending = await asyncio.wait(scheduled, timeout=timeout + 2)
         for task in pending:
             task.cancel()
-        results = []
+
+        raw_results: list = []
         for task in done:
             try:
-                results.append(task.result())
+                raw_results.append(task.result())
             except Exception as exc:
-                results.append(exc)
+                raw_results.append(exc)
         if pending:
-            results.append({"source": "pending_sources", "ok": False, "error": f"{len(pending)} source task(s) timed out", "results": []})
+            raw_results.append({
+                "source": "pending_sources",
+                "ok": False,
+                "error": f"{len(pending)} source task(s) timed out",
+                "results": [],
+            })
 
-    source_status = []
-    evidence = []
-    domain_results = []
-    for result in results:
+    # ------------------------------------------------------------------
+    # Step 3 — collate evidence & domain intelligence
+    # ------------------------------------------------------------------
+    source_status: list[dict] = []
+    evidence: list[dict] = []
+    domain_results: list[dict] = []
+
+    for result in raw_results:
         if isinstance(result, Exception):
             source_status.append({"source": "unknown", "ok": False, "error": str(result)})
             continue
@@ -615,13 +913,50 @@ async def run_osint(entities: dict, initial_fraud_score: float, timeout: float) 
             evidence.extend(result.get("results", []))
 
     evidence = _dedupe_results(evidence, limit=80)
+    evidence = [item for item in evidence if _is_relevant(item)]
     classified = _classify_reports(evidence)
     risk = _risk_score(entities, domain_results, classified["scam_report_count"], initial_fraud_score)
 
+    # ------------------------------------------------------------------
+    # Step 4 — enrich local suspicious-entity scores with external data
+    # ------------------------------------------------------------------
+    enriched_entities = _enrich_with_external_evidence(locally_scored, evidence)
+
+    # Also apply RDAP domain-age boosts to entity scores
+    rdap_by_domain = {r["domain"].lower(): r for r in domain_results if r.get("ok") and r.get("domain")}
+    for entry in enriched_entities:
+        ev = entry["entity"].lower()
+        # Strip mailto / scheme from entity for domain lookup
+        domain_key = ev.split("@", 1)[-1] if "@" in ev else ev.replace("https://", "").replace("http://", "").split("/")[0]
+        rdap = rdap_by_domain.get(domain_key)
+        if rdap:
+            age = rdap.get("age_days")
+            if age is not None and age < 180:
+                entry["score"] = min(100, entry["score"] + WEIGHTS["domain_young_180d"])
+                entry["matched_keywords"].append("domain age < 180 days")
+            elif age is not None and age < 365:
+                entry["score"] = min(100, entry["score"] + WEIGHTS["domain_young_365d"])
+                entry["matched_keywords"].append("domain age < 1 year")
+            if rdap.get("suspicious_tld"):
+                entry["score"] = min(100, entry["score"] + WEIGHTS["suspicious_tld"])
+                entry["matched_keywords"].append("suspicious TLD")
+
+    # Final sort after all enrichment passes
+    TYPE_PRIORITY = {"email": 0, "phone": 1, "url": 2, "domain": 3, "company": 4, "recruiter": 5}
+    enriched_entities.sort(key=lambda x: (-x["score"], TYPE_PRIORITY.get(x["type"], 99)))
+
+    # ------------------------------------------------------------------
+    # Step 5 — return structured response
+    # ------------------------------------------------------------------
+    timed_out = any(item.get("source") == "pending_sources" for item in source_status)
     return {
-        "status": "partial_timeout" if any(item.get("source") == "pending_sources" for item in source_status) else "complete",
+        "status": "partial_timeout" if timed_out else "complete",
         "query": query,
+        # Core new field: only suspicious entities, ranked
+        "suspicious_entities": enriched_entities,
+        # Aggregate OSINT risk
         "risk": risk,
+        # Public intelligence evidence
         "evidence": evidence[:60],
         "domain_intelligence": domain_results,
         "scam_reports": classified["scam_reports"][:25],

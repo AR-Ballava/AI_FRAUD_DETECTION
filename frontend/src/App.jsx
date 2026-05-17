@@ -84,7 +84,7 @@ function App() {
                 AI-Powered Fraud Intelligence Platform
               </p>
               <h1>
-                Detect <strong>Fake Jobs</strong>
+                Detect <strong>Fraud Jobs</strong>
                 <br />
                 Before They <em>Detect You</em>
               </h1>
