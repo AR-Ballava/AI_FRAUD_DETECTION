@@ -1,6 +1,6 @@
-# 🛡️ FraudLens AI — Job Fraud Detection & OSINT Intelligence Platform
+# 🛡️ FraudShield AI — Job Fraud Detection & OSINT Intelligence Platform
 
-> **FraudLens AI** is a production-ready, three-microservice platform that detects fake job postings, fraudulent offer letters, and suspicious recruitment communications using a hybrid AI + OSINT intelligence pipeline.
+> **FrauShield AI** is a production-ready platform that detects fake job postings, fraudulent offer letters, and suspicious recruitment communications using a hybrid AI + OSINT intelligence pipeline.
 
 🔗 **Live Demo:** [ai-fraud-detection-neon.vercel.app](https://ai-fraud-detection-neon.vercel.app)
 📦 **Repo:** [github.com/AR-Ballava/AI_FRAUD_DETECTION](https://github.com/AR-Ballava/AI_FRAUD_DETECTION)
