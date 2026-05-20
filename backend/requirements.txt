@@ -4,4 +4,5 @@ pydantic
 pydantic-settings
 python-multipart
 httpx
+upstash-redis
 

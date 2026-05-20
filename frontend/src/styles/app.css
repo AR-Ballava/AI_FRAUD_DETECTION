@@ -920,143 +920,449 @@ th {
 
 
 
-/* ========================================= */
-/* SUSPICIOUS ENTITY CARD */
-/* ========================================= */
 
-.suspicious-card {
-  position: relative;
 
-  background: rgba(10, 18, 38, 0.95);
 
-  border: 1px solid rgba(0, 255, 255, 0.08);
 
-  border-radius: 18px;
 
-  padding: 22px;
 
-  transition: all 0.3s ease;
+/* ═══════════════════════════════════════════════════════════
+   SUSPICIOUS ENTITY DETECTION — CSS ADDITIONS
+   Paste these rules into your main stylesheet (e.g. App.css,
+   globals.css, or workspace.css).
+   ═══════════════════════════════════════════════════════════ */
 
-  overflow: hidden;
+/* ── Risk colour tokens ─────────────────────────────────── */
+:root {
+  --risk-critical-bg:   #2d0a0a;
+  --risk-critical-border: #dc2626;
+  --risk-critical-text:  #f87171;
+  --risk-critical-badge: #dc2626;
+
+  --risk-high-bg:   #2a1200;
+  --risk-high-border: #ea580c;
+  --risk-high-text:  #fb923c;
+  --risk-high-badge: #ea580c;
+
+  --risk-medium-bg:   #1f1800;
+  --risk-medium-border: #ca8a04;
+  --risk-medium-text:  #facc15;
+  --risk-medium-badge: #ca8a04;
+
+  --risk-low-bg:   #0a1f0a;
+  --risk-low-border: #16a34a;
+  --risk-low-text:  #4ade80;
+  --risk-low-badge: #16a34a;
 }
 
-.suspicious-card:hover {
-  transform: translateY(-4px);
-
-  border-color: rgba(0, 255, 255, 0.25);
+/* ── Suspicious Entities section wrapper ────────────────── */
+.sus-entities-section {
+  margin-top: 2rem;
 }
 
-/* ========================================= */
-/* RED HIGHLIGHT */
-/* ========================================= */
-
-.critical-highlight {
-  border: 2px solid #ff3b3b !important;
-
-  box-shadow:
-    0 0 15px rgba(255, 0, 0, 0.25),
-    0 0 35px rgba(255, 0, 0, 0.15);
-
-  animation: dangerPulse 2s infinite;
-}
-
-/* ========================================= */
-/* HIGH RISK BADGE */
-/* ========================================= */
-
-.danger-badge {
-  position: absolute;
-
-  top: 16px;
-  right: 16px;
-
-  background: linear-gradient(135deg, #ff2d2d, #ff0000);
-
-  color: white;
-
-  font-size: 11px;
-
-  font-weight: 800;
-
-  letter-spacing: 0.6px;
-
-  padding: 6px 12px;
-
-  border-radius: 999px;
-
-  box-shadow: 0 0 15px rgba(255, 0, 0, 0.45);
-
-  z-index: 20;
-}
-
-/* ========================================= */
-/* SCORE COLORS */
-/* ========================================= */
-
-.entity-score {
-  min-width: 58px;
-
-  height: 58px;
-
-  border-radius: 16px;
-
+.sus-entities-header {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
 
+.sus-entities-title {
+  display: flex;
   align-items: center;
+  gap: 0.6rem;
+}
 
+.sus-entities-title h3 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sus-entities-sub {
+  font-size: 0.78rem;
+  opacity: 0.55;
+  margin: 0;
+  align-self: center;
+}
+
+/* Count badge next to section title */
+.sus-count-badge {
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--risk-critical-badge);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+}
 
-  font-size: 18px;
+/* ── Entity card grid ───────────────────────────────────── */
+.sus-entities-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
 
+/* ── Individual suspicious-entity card ──────────────────── */
+.sus-entity-card {
+  position: relative;
+  border-radius: 10px;
+  border: 1.5px solid;
+  padding: 1rem 1rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  transition: box-shadow 0.18s;
+}
+
+.sus-entity-card:hover {
+  box-shadow: 0 0 0 3px currentColor;
+}
+
+.sus-entity-card.risk-critical {
+  background: var(--risk-critical-bg);
+  border-color: var(--risk-critical-border);
+  color: var(--risk-critical-text);
+}
+.sus-entity-card.risk-high {
+  background: var(--risk-high-bg);
+  border-color: var(--risk-high-border);
+  color: var(--risk-high-text);
+}
+.sus-entity-card.risk-medium {
+  background: var(--risk-medium-bg);
+  border-color: var(--risk-medium-border);
+  color: var(--risk-medium-text);
+}
+.sus-entity-card.risk-low {
+  background: var(--risk-low-bg);
+  border-color: var(--risk-low-border);
+  color: var(--risk-low-text);
+}
+
+/* Rank badge (top-right corner) */
+.entity-rank {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.75rem;
+  font-size: 0.68rem;
   font-weight: 800;
+  opacity: 0.4;
+  letter-spacing: 0.04em;
 }
 
-.entity-score.critical {
-  background: #ff1f1f;
-
-  color: white;
-
-  box-shadow: 0 0 18px rgba(255, 0, 0, 0.35);
+/* Header row: type pill + score badge */
+.entity-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
 
-.entity-score.high {
-  background: #ff7a00;
-
-  color: white;
+.entity-type-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.75;
 }
 
-.entity-score.medium {
-  background: #f0b429;
-
-  color: black;
+/* Score badge */
+.entity-score-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 7px;
+  padding: 0.2rem 0.5rem;
+  font-weight: 800;
+  line-height: 1.1;
+  border: 1px solid;
 }
 
-.entity-score.low {
-  background: #1f2937;
-
-  color: white;
+.entity-score-badge span {
+  font-size: 1.15rem;
 }
 
-/* ========================================= */
-/* PULSE EFFECT */
-/* ========================================= */
+.entity-score-badge small {
+  font-size: 0.62rem;
+  font-weight: 600;
+  opacity: 0.75;
+  white-space: nowrap;
+}
 
-@keyframes dangerPulse {
-  0% {
-    box-shadow:
-      0 0 12px rgba(255, 0, 0, 0.25),
-      0 0 24px rgba(255, 0, 0, 0.1);
-  }
+.entity-score-badge.risk-critical { border-color: var(--risk-critical-border); background: rgba(220,38,38,.15); }
+.entity-score-badge.risk-high     { border-color: var(--risk-high-border);     background: rgba(234,88,12,.15); }
+.entity-score-badge.risk-medium   { border-color: var(--risk-medium-border);   background: rgba(202,138,4,.15); }
+.entity-score-badge.risk-low      { border-color: var(--risk-low-border);      background: rgba(22,163,74,.15); }
 
-  50% {
-    box-shadow:
-      0 0 28px rgba(255, 0, 0, 0.55),
-      0 0 50px rgba(255, 0, 0, 0.25);
-  }
+/* Entity value (the extracted string) */
+.entity-value {
+  font-size: 0.92rem;
+  font-weight: 600;
+  word-break: break-all;
+  margin: 0;
+  opacity: 0.95;
+}
 
-  100% {
-    box-shadow:
-      0 0 12px rgba(255, 0, 0, 0.25),
-      0 0 24px rgba(255, 0, 0, 0.1);
-  }
+/* Keyword chips row */
+.keyword-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.keyword-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.67rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.18rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.14);
+  opacity: 0.9;
+}
+
+.keyword-chip.muted {
+  opacity: 0.45;
+}
+
+.keyword-chip.small {
+  font-size: 0.62rem;
+  padding: 0.12rem 0.35rem;
+}
+
+/* Context toggle + blockquote */
+.entity-context-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.context-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  opacity: 0.6;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+}
+
+.context-toggle:hover { opacity: 1; }
+
+.entity-context {
+  margin: 0;
+  padding: 0.55rem 0.75rem;
+  border-left: 2px solid;
+  border-color: inherit;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  opacity: 0.75;
+  font-style: italic;
+  border-radius: 0 4px 4px 0;
+  background: rgba(255,255,255,0.04);
+}
+
+/* Evidence summary line */
+.entity-evidence-summary {
+  font-size: 0.73rem;
+  margin: 0;
+  opacity: 0.6;
+  line-height: 1.5;
+}
+
+/* External evidence badge */
+.external-evidence-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.67rem;
+  font-weight: 700;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 4px;
+  padding: 0.18rem 0.45rem;
+  align-self: flex-start;
+}
+
+/* ── No suspicious entities state ───────────────────────── */
+.no-sus-entities {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.75rem;
+  padding: 2.5rem 1.5rem;
+  border: 1.5px dashed rgba(74,222,128,0.3);
+  border-radius: 10px;
+  color: #4ade80;
+}
+
+.no-sus-entities h3 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.no-sus-entities p {
+  margin: 0;
+  font-size: 0.82rem;
+  opacity: 0.7;
+  max-width: 480px;
+  line-height: 1.6;
+}
+
+/* ── Evidence section (collapsible) ─────────────────────── */
+.evidence-section {
+  margin-top: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.evidence-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 6px;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.7;
+  transition: opacity 0.15s, border-color 0.15s;
+  align-self: flex-start;
+}
+
+.evidence-toggle-btn:hover {
+  opacity: 1;
+  border-color: rgba(255,255,255,0.3);
+}
+
+/* ── ResultsSection — suspicious entity strip ───────────── */
+.sus-entity-strip {
+  margin: 1.5rem 0;
+  padding: 1.25rem;
+  border-radius: 10px;
+  border: 1.5px solid rgba(220,38,38,0.35);
+  background: rgba(220,38,38,0.06);
+}
+
+.sus-entity-strip h3 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #f87171;
+}
+
+.strip-sub {
+  font-size: 0.72rem;
+  opacity: 0.5;
+  margin: 0 0 1rem;
+}
+
+.strip-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+
+.strip-card {
+  border-radius: 8px;
+  border: 1px solid;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.strip-card.risk-critical { background: var(--risk-critical-bg); border-color: var(--risk-critical-border); color: var(--risk-critical-text); }
+.strip-card.risk-high     { background: var(--risk-high-bg);     border-color: var(--risk-high-border);     color: var(--risk-high-text);     }
+.strip-card.risk-medium   { background: var(--risk-medium-bg);   border-color: var(--risk-medium-border);   color: var(--risk-medium-text);   }
+.strip-card.risk-low      { background: var(--risk-low-bg);      border-color: var(--risk-low-border);      color: var(--risk-low-text);      }
+
+.strip-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.strip-score {
+  font-size: 1.4rem;
+  font-weight: 800;
+  display: flex;
+  flex-direction: column;
+  line-height: 1;
+}
+
+.strip-score small {
+  font-size: 0.6rem;
+  font-weight: 600;
+  opacity: 0.65;
+}
+
+.strip-type {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  opacity: 0.6;
+}
+
+.strip-entity {
+  font-size: 0.78rem;
+  font-weight: 600;
+  word-break: break-all;
+  margin: 0;
+}
+
+.strip-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.strip-overflow {
+  margin: 0.75rem 0 0;
+  font-size: 0.72rem;
+  opacity: 0.5;
+}
+
+/* ── OSINT summary — 4-column variant ───────────────────── */
+/* The stat grid already exists in your CSS; this extends it
+   to support 4 columns when a 4th card is present.          */
+.osint-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
 }

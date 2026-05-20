@@ -1,6 +1,6 @@
-import { AlertTriangle, CheckCircle2, Gauge, ShieldAlert } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Gauge, ShieldAlert, Eye } from 'lucide-react';
 
-function ResultsSection({ result, loading }) {
+function ResultsSection({ result, loading, onNavigate }) {
   const fraudScore = result?.fraud_score ?? 0;
   const safeScore = result?.legitimacy_score ?? 0;
 
@@ -60,6 +60,21 @@ function ResultsSection({ result, loading }) {
           tone="safe"
         />
       </div>
+
+      {/* NEW FEATURE: Shows only when the AI analysis has completed successfully */}
+      {!loading && result && (
+        <div className="action-footer-strip" style={{ marginTop: '2.5rem', display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={() => onNavigate('osint')}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+          >
+            <Eye size={18} />
+            Go to OSINT Page
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -89,4 +104,3 @@ function IndicatorList({ title, icon, items, tone }) {
 }
 
 export default ResultsSection;
-

@@ -111,7 +111,13 @@ function App() {
           </section>
         )}
 
-        {currentPage === 'analysis' && <ResultsSection result={result} loading={loading} />}
+        {currentPage === 'analysis' && (
+          <ResultsSection 
+            result={result} 
+            loading={loading} 
+            onNavigate={setCurrentPage} 
+          />
+        )}
 
         {currentPage === 'osint' && (
           <OsintSection
