@@ -14,6 +14,7 @@ from app.utils.entities import extract_entities, merge_entities
 from app.utils.sanitize import sanitize_text
 from app.utils.validation import ValidationError, decode_text_file, validate_file_upload
 
+
 router = APIRouter()
 
 
@@ -41,99 +42,124 @@ async def _analyze_payload(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     entities = merge_entities(text_entities, model_result.get("entities", {}))
-    fraud_score = model_result.get("fraud_score", 0.0)
-    risk_level = model_result.get("risk_level", "low")
+    fraud_score = float(model_result.get("fraud_score", 0))
+    osint_triggered = fraud_score >= settings.fraud_osint_threshold
 
-    osint_result = await run_osint(
-        entities=entities,
-        timeout=settings.scrape_timeout,
-        source_text=clean_text,
-    )
-    
-    osint_score = score_suspicious_entities(osint_result)
-    final_score = min(100.0, max(0.0, (fraud_score * 0.7) + (osint_score * 0.3)))
-    
-    if final_score >= 75.0:
-        final_risk = "high"
-    elif final_score >= 40.0:
-        final_risk = "medium"
-    else:
-        final_risk = "low"
+    # ── Default OSINT payload (returned even when not triggered) ──
+    osint: dict = {
+        "status": "not_triggered",
+        "risk": {"score": 0, "level": "minimal", "reasons": []},
+        # Always run local contextual entity scoring — no network required
+        "suspicious_entities": score_suspicious_entities(clean_text),
+        "evidence": [],
+        "domain_intelligence": [],
+        "scam_reports": [],
+        "source_status": [],
+    }
 
-    if hasattr(request.app.state, "analytics") and request.app.state.analytics:
-        await request.app.state.analytics.record_detection(
-            fraud_score=final_score,
-            risk_level=final_risk,
-            source_type=source_type,
-            entities=entities,
+    if osint_triggered:
+        # Full async OSINT fetch — passes source_text for local scoring pass
+        osint = await run_osint(
+            entities,
+            initial_fraud_score=fraud_score,
+            timeout=settings.scrape_timeout,
+            source_text=clean_text,
         )
 
-    graph = build_graph(entities, {"fraud_score": final_score}, osint_result)
+    graph = build_graph(entities, model_result, osint)
     request.app.state.latest_graph = graph
 
-    return {
-        "fraud_score": final_score,
-        "risk_level": final_risk,
-        "source_type": source_type,
-        "analysis_duration": time.perf_counter() - started,
+    await request.app.state.analytics.record_detection(
+        fraud_score=fraud_score,
+        risk_level=model_result.get("risk_level", "unknown"),
+        source_type=source_type,
+        entities=entities,
+    )
+
+    total_processing = round((time.perf_counter() - started) * 1000, 2)
+    response = {
+        **model_result,
+        "processing_time_ms": model_result.get("processing_time_ms", 0) + total_processing,
         "entities": entities,
-        "osint": osint_result,
+        "osint_triggered": osint_triggered,
+        "osint": osint,
         "graph": graph,
     }
+    return AnalysisResponse(**response)
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
-async def analyze(request: Request, payload: AnalyzeRequest) -> AnalysisResponse:
-    return await _analyze_payload(
-        request=request,
-        text=payload.text,
-        source_type=payload.source_type,
-    )
+async def analyze(payload: AnalyzeRequest, request: Request) -> AnalysisResponse:
+    try:
+        clean_text = sanitize_text(payload.text, get_settings().max_text_chars)
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    return await _analyze_payload(request, clean_text, payload.source_type)
 
 
-@router.post("/analyze/file", response_model=AnalysisResponse)
-async def analyze_file(
+@router.post("/upload", response_model=AnalysisResponse)
+async def upload(
     request: Request,
     file: UploadFile = File(...),
-    source_type: str = Form("paste"),
+    source_type: str = Form("upload"),
 ) -> AnalysisResponse:
+    settings = get_settings()
+    data = await file.read()
     try:
-        validate_file_upload(file)
-        content = await file.read()
-    except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    if file.filename and file.filename.lower().endswith(".pdf"):
-        base64_pdf = base64.b64encode(content).decode("utf-8")
-        return await _analyze_payload(
-            request=request,
-            text=None,
-            source_type=source_type,
-            base64_pdf=base64_pdf,
+        file_kind = validate_file_upload(
+            file.filename or "upload",
+            file.content_type,
+            data,
+            settings.max_file_size,
         )
-
-    raw_text = decode_text_file(content)
-    return await _analyze_payload(
-        request=request,
-        text=raw_text,
-        source_type=source_type,
-    )
+        if file_kind == "pdf":
+            # For PDFs we can't easily do sentence-level contextual scoring
+            # without extracting text first; pass empty source_text and let
+            # the model-extracted entities drive OSINT.
+            return await _analyze_payload(
+                request,
+                text="",
+                source_type=source_type,
+                base64_pdf=base64.b64encode(data).decode("ascii"),
+            )
+        raw_text = decode_text_file(data)
+        clean_text = sanitize_text(raw_text, settings.max_text_chars)
+        return await _analyze_payload(request, clean_text, source_type)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    finally:
+        await file.close()
 
 
 @router.post("/osint")
-async def osint(request: Request, payload: OsintRequest) -> dict:
+async def osint(payload: OsintRequest, request: Request) -> dict:
     settings = get_settings()
-    raw_text = payload.source_text or ""
-    entities = {
-        "domains": payload.domains or [],
-        "emails": payload.emails or [],
-        "phones": payload.phones or [],
-        "companies": payload.companies or [],
-    }
-    fraud_score = payload.fraud_score or 0.0
-    
+    raw_text = ""
+    text_entities: dict = {}
+
+    if payload.text:
+        try:
+            raw_text = sanitize_text(payload.text, settings.max_text_chars)
+        except ValueError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        text_entities = extract_entities(raw_text)
+
+    entities = merge_entities(payload.entities, text_entities)
+    if not any(
+        entities.get(key)
+        for key in ("emails", "phones", "domains", "urls", "companies", "recruiters", "positions")
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Manual OSINT requires at least one company, email, domain, phone, recruiter, or job role",
+        )
+
+    fraud_score = payload.fraud_score or settings.fraud_osint_threshold
     osint_result = await run_osint(
-        entities=entities,
+        entities,
+        fraud_score,
         timeout=settings.scrape_timeout,
         source_text=raw_text,
     )
@@ -149,13 +175,11 @@ async def osint(request: Request, payload: OsintRequest) -> dict:
 
 @router.get("/analytics")
 async def analytics(request: Request) -> dict:
-    # Pure data output path - Increments are handled explicitly by main.py middleware filtering
     return await request.app.state.analytics.snapshot()
 
 
 @router.get("/stats")
 async def stats(request: Request) -> dict:
-    # Pure data output path - Increments are handled explicitly by main.py middleware filtering
     data = await request.app.state.analytics.snapshot()
     return {
         "lifetime_visitors": data.get("lifetime_visitors", 0),
@@ -176,4 +200,10 @@ async def graph_data(request: Request) -> dict:
 
 @router.get("/health")
 async def health(request: Request) -> dict:
-    return {"status": "healthy", "timestamp": time.time()}
+    model_health = await request.app.state.model_client.health()
+    return {
+        "status": "ok",
+        "model_service": model_health,
+        "analytics": "ok",
+        "rate_limit": get_settings().rate_limit,
+    }
