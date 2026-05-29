@@ -218,8 +218,8 @@ main {
 }
 
 .counter-grid {
-  grid-template-columns: repeat(3, minmax(140px, 1fr));
-  width: min(620px, 100%);
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  width: min(720px, 100%);
   margin-top: 54px;
 }
 
@@ -231,7 +231,7 @@ main {
 .counter-grid span {
   display: block;
   color: var(--cyan);
-  font-size: clamp(2rem, 4vw, 3rem);
+  font-size: clamp(1rem, 3vw, 2rem);
   font-weight: 950;
 }
 
@@ -855,7 +855,7 @@ th {
   .counter-grid,
   .analytics-counters,
   .osint-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -1365,4 +1365,46 @@ th {
 .osint-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+
+
+
+/* ── Stats sync dot ──────────────────────────────────────────────────────────
+   Paste this into your existing App.css or index.css.
+   The .counter-grid div already has position relative from your styles;
+   if not, add: .counter-grid > div { position: relative; }
+   ─────────────────────────────────────────────────────────────────────────── */
+
+.counter-grid > div {
+  position: relative;   /* needed so the dot positions correctly */
+  border: 1px solid rgba(255, 255, 255, 0.103);
+  padding: 3px 0px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.055);}
+
+.stats-sync-dot {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+/* Amber + pulse = still syncing (backend waking up) */
+.stats-sync-dot.pending {
+  background: #0bf51f;
+  animation: sync-pulse 1.6s ease-in-out infinite;
+}
+
+/* Green = backend confirmed the number */
+.stats-sync-dot.synced {
+  background: #22c55e;
+  animation: none;
+}
+
+@keyframes sync-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1.1);   }
+  50%       { opacity: 0.3; transform: scale(0.5); }
 }
