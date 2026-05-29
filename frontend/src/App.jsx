@@ -44,8 +44,8 @@ function App() {
   const cache = readCache();
   const [stats, setStats] = useState({
     ...emptyStats,
-    lifetime_visitors:         cache?.visitors ?? 0,
-    lifetime_fraud_detections: cache?.frauds   ?? 0,
+    lifetime_visitors:         cache?.visitors ?? 31,
+    lifetime_fraud_detections: cache?.frauds   ?? 3,
   });
   const [analytics, setAnalytics] = useState(emptyStats);
   const [synced,    setSynced]    = useState(false);   // true once backend replies
@@ -66,8 +66,8 @@ function App() {
   // This way even if the backend is asleep, the visit is still counted locally.
   useEffect(() => {
     const cached      = readCache();
-    const newVisitors = (cached?.visitors ?? 0) + 1;
-    const newFrauds   = cached?.frauds ?? 0;
+    const newVisitors = (cached?.visitors ?? 31) + 1;   // ← was 0
+    const newFrauds   = cached?.frauds   ?? 3;          // ← was 0
 
     setStats(prev => ({ ...prev, lifetime_visitors: newVisitors }));
     writeCache(newVisitors, newFrauds);
