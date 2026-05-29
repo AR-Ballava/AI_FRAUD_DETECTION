@@ -87,7 +87,7 @@ function App() {
         if (unmounted) return;
 
         const backendVisitors = Number(statsData.lifetime_visitors         ?? 0);
-        const backendFrauds   = Number(statsData.lifetime_fraud_detections ?? 0);
+        const backendFrauds = Number(statsData.fraud_detections ?? 0) + Number(statsData.safe_detections ?? 0);
 
         // Take max of local vs backend so the number never goes backwards
         // (backend may have missed visits while it was asleep)
@@ -225,8 +225,8 @@ function App() {
                     className={`stats-sync-dot ${synced ? 'synced' : 'pending'}`}
                     title={synced ? 'Live data' : 'Syncing with server…'}
                   />
-                  <AnimatedNumber value={stats.lifetime_fraud_detections} suffix="" />
-                  <p>Fraud Detections</p>
+                  <AnimatedNumber value={stats.fraud_detections + stats.safe_detections} suffix="" />
+                  <p>Total Detections</p>
                 </div>
 
                 <div>
